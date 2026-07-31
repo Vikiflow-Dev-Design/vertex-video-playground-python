@@ -1,0 +1,5 @@
+google-genai>=1.44.0
+python-dotenv>=1.0.1
+requests>=2.32.3
+edge-tts>=6.1.19
+pymongo>=4.17.0

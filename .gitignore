@@ -1,0 +1,14 @@
+.env
+gcp-key.json
+.venv/
+.venv2/
+__pycache__/
+*.pyc
+outputs/
+*.log
+.DS_Store
+
+# Ignore all projects under video_projects except README.md and _workspace_defaults.json
+video_projects/*
+!video_projects/README.md
+!video_projects/_workspace_defaults.json

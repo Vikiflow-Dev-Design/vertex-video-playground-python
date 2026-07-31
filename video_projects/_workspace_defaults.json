@@ -1,0 +1,14 @@
+{
+  "gcp_project_id": "project-fb2dc00c-a54a-48bd-884",
+  "gcp_location": "global",
+  "gcs_bucket": "my-video-automation-bucket-1",
+  "gcs_prefix": "hermes",
+  "gemini_model": "gemini-2.5-flash",
+  "story_model": "gemini-2.5-flash",
+  "veo_model": "veo-3.1-lite-generate-001",
+  "veo_resolution": "720p",
+  "veo_generate_audio": false,
+  "mongo_uri": "mongodb://victor:victoruche22123vic@76.13.42.74:27017/?directConnection=true",
+  "mongo_db": "video-studio",
+  "mongo_user_id": "6a4264656320d6dd8421deba"
+}
