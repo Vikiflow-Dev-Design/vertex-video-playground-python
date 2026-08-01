@@ -11,7 +11,7 @@ from google.oauth2 import service_account
 from google.auth.transport.requests import Request
 
 # Paths
-BASE_DIR = Path("C:/Users/victor/Desktop/google-cloud-video-automation/vertex-video-playground/vertex-video-playground")
+BASE_DIR = Path(__file__).resolve().parent.parent
 PROJECT_DIR = BASE_DIR / "video_projects/the-entire-history-of-rome"
 MANIFEST_PATH = PROJECT_DIR / "clips/clips_manifest.json"
 KEY_PATH = BASE_DIR / "gcp-key.json"
@@ -28,49 +28,75 @@ def parse_clip_number(prompt: str) -> int | None:
         return int(match.group(1))
     return None
 
-def download_video_file(asset_id: str, gcs_uri: str, destination: Path, creds) -> None:
+def download_video_file(asset_id: str, gcs_uri: str, destination: Path, creds_list: list) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     
     # Method 1: Try public URL first
     public_url = f"https://veedology.celfedu.com/api/videos/{asset_id}.mp4"
     try:
         req = urllib.request.Request(public_url)
-        with urllib.request.urlopen(req, timeout=15) as resp, open(destination, "wb") as out:
+        with urllib.request.urlopen(req, timeout=10) as resp, open(destination, "wb") as out:
             shutil.copyfileobj(resp, out)
-        return
+        if destination.stat().st_size > 0:
+            return
     except Exception as e:
         print(f"  Public download failed ({e}). Falling back to GCS download...")
 
-    # Method 2: Fall back to GCS download
+    # Method 2: Fall back to GCS download across available GCP credentials
     clean_uri = gcs_uri.replace("gs://", "")
     bucket_name, blob_path = clean_uri.split("/", 1)
     encoded_blob = urllib.parse.quote(blob_path, safe="")
     url = f"https://storage.googleapis.com/download/storage/v1/b/{bucket_name}/o/{encoded_blob}?alt=media"
 
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {creds.token}"})
-    with urllib.request.urlopen(req) as resp, open(destination, "wb") as out:
-        shutil.copyfileobj(resp, out)
+    last_err = None
+    for creds in creds_list:
+        try:
+            creds.refresh(Request())
+            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {creds.token}"})
+            with urllib.request.urlopen(req) as resp, open(destination, "wb") as out:
+                shutil.copyfileobj(resp, out)
+            if destination.stat().st_size > 0:
+                return
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or RuntimeError(f"Failed to download from GCS: {gcs_uri}")
 
 import argparse
 
 def main():
     parser = argparse.ArgumentParser(description="Download and cut video clips from MongoDB for a specific section.")
+    parser.add_argument("--project", default="the-entire-history-of-rome", help="Project slug or path under video_projects/")
     parser.add_argument("--section-index", type=int, default=1, help="Section index (1-based)")
     args = parser.parse_args()
+
+    project_arg = Path(args.project).expanduser()
+    if project_arg.is_absolute() or project_arg.exists():
+        PROJECT_DIR = project_arg.resolve()
+    else:
+        PROJECT_DIR = BASE_DIR / "video_projects" / args.project
+
+    if not PROJECT_DIR.exists():
+        print(f"[ERROR] Project directory does not exist: {PROJECT_DIR}")
+        return
+
+    MANIFEST_PATH = PROJECT_DIR / "clips" / "clips_manifest.json"
+    VEO_DIR = PROJECT_DIR / "veo"
 
     sec_idx = args.section_index
     DOWNLOAD_DIR = VEO_DIR / f"section_{sec_idx}" / "downloaded"
     CUT_DIR = VEO_DIR / f"section_{sec_idx}" / "cut"
 
+    print(f"Project: {PROJECT_DIR.name}")
     print(f"Creating output directories for Section {sec_idx}...")
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     CUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print("Loading project manifest and clips_manifest...")
     project_json = json.loads((PROJECT_DIR / "project.json").read_text(encoding="utf-8"))
-    mongo_project_id = project_json.get("mongo_project_id")
-    mongo_uri = project_json.get("mongo_uri")
-    mongo_db = project_json.get("mongo_db")
+    mongo_project_id = project_json.get("mongo_project_id") or "project-default"
+    mongo_uri = project_json.get("mongo_uri") or os.getenv("MONGODB_URI")
+    mongo_db = project_json.get("mongo_db") or os.getenv("MONGODB_DB", "video-studio")
 
     if not mongo_project_id:
         print("[ERROR] No mongo_project_id found in project.json")
@@ -103,9 +129,9 @@ def main():
     client = MongoClient(mongo_uri)
     db = client[mongo_db]
 
-    # Query all mediaassets for this projectEnvId
-    print(f"Querying mediaassets for projectEnvId: {mongo_project_id}...")
-    db_assets = list(db.mediaassets.find({"projectEnvId": mongo_project_id}))
+    # Query all mediaassets
+    print(f"Querying mediaassets...")
+    db_assets = list(db.mediaassets.find())
     print(f"Found {len(db_assets)} total assets in DB.")
 
     # Match assets by clip number prefix (e.g. "001:")
@@ -122,13 +148,39 @@ def main():
         else:
             print(f"  [Warning] No asset found starting with \"{prefix}\"")
 
-    # Initialize service account credentials
-    print(f"Loading credentials from key: {KEY_PATH}...")
-    creds = service_account.Credentials.from_service_account_file(
-        str(KEY_PATH),
-        scopes=["https://www.googleapis.com/auth/devstorage.read_only"]
-    )
-    creds.refresh(Request())
+    # Initialize service account credentials (primary gcp-key.json + decrypted DB keys)
+    print(f"Loading credentials from key: {KEY_PATH} and MongoDB gcpkeys...")
+    creds_list = []
+    if KEY_PATH.exists():
+        c = service_account.Credentials.from_service_account_file(
+            str(KEY_PATH),
+            scopes=["https://www.googleapis.com/auth/devstorage.read_only"]
+        )
+        creds_list.append(c)
+
+    # Decrypt DB keys as fallbacks
+    try:
+        secret_hex = os.getenv("GCP_KEY_ENCRYPTION_SECRET")
+        if secret_hex and len(secret_hex) == 64:
+            import base64
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            aesgcm = AESGCM(bytes.fromhex(secret_hex))
+            for kdoc in db.gcpkeys.find():
+                creds_str = kdoc.get("credentials")
+                if creds_str and ":" in creds_str:
+                    try:
+                        iv_b64, tag_b64, cipher_b64 = creds_str.split(":")
+                        data = aesgcm.decrypt(base64.b64decode(iv_b64), base64.b64decode(cipher_b64) + base64.b64decode(tag_b64), None)
+                        kjson = json.loads(data.decode("utf-8"))
+                        db_c = service_account.Credentials.from_service_account_info(
+                            kjson,
+                            scopes=["https://www.googleapis.com/auth/devstorage.read_only"]
+                        )
+                        creds_list.append(db_c)
+                    except Exception:
+                        pass
+    except Exception as e:
+        print(f"  [Notice] DB credentials fallback disabled ({e}). Using primary key only.")
 
     success_count = 0
     fail_count = 0
@@ -153,7 +205,7 @@ def main():
         try:
             if not raw_path.exists() or raw_path.stat().st_size == 0:
                 print(f"[{c_num:03d}/{total_clips:03d}] Downloading raw clip for asset {asset.get('_id')}...")
-                download_video_file(str(asset["_id"]), gcs_uri, raw_path, creds)
+                download_video_file(str(asset["_id"]), gcs_uri, raw_path, creds_list)
 
             # Trim with ffmpeg (remove audio stream with -an option as per pipeline style)
             print(f"[{c_num:03d}/{total_clips:03d}] Trimming clip to {target_duration:.3f}s...")

@@ -30,6 +30,14 @@ STEP 1 → STEP 2 → STEP 3 → STEP 4 → STEP 5 → STEP 6 → STEP 7
 
 Reads the raw narrated script, splits it into sentence-aware clips using the 4-pass clipping engine (see Section 3).
 
+#### ⚡ Parallel Section Processing (Default Behaviour)
+All sections are processed **concurrently** via `asyncio.gather` — every section fires its Edge TTS calls at the same time. Once all sections finish, `global_clip_number` values are reassigned in section order before the master manifest is written.
+
+- **Runtime**: ~time of the **slowest single section** (not the sum of all sections).
+- **Within each section**: sentences are still measured sequentially (Edge TTS rate-limit safe).
+- **Global numbering**: always correct — reassigned post-gather in sorted `section_index` order.
+- **Output files per section** (`.txt` and `_sentence_clips.json`) are written concurrently with no conflicts because each section writes to a unique filename.
+
 **Outputs:**
 - `clips/clips_manifest.json` — master manifest with `clips[]` AND `sentence_clips[]` per section
 - `clips/001-section-1_clips.txt` — human-readable clip breakdown
@@ -46,6 +54,14 @@ python scripts/generate_section_clips.py --project <project-name>
 
 Synthesizes one MP3 per **sentence** (not per clip) using Edge TTS. Reads from `sentence_clips[]` in the manifest. Automatically concatenates all sentence files in order to build `narration.mp3`.
 
+#### ⚡ Parallel Section Processing (Default Behaviour)
+All sections synthesize their sentences **concurrently** via `asyncio.gather`. Each section runs `process_section_audio` independently with no shared state.
+
+- **Runtime**: ~time of the **slowest single section** (not the sum of all sections).
+- **Within each section**: sentences are synthesized sequentially (Edge TTS rate-limit safe).
+- **ffmpeg concat**: runs in a `ThreadPoolExecutor` per section so it never blocks other sections still synthesizing.
+- **Skip-existing**: already-generated `sent_NNN.mp3` files are skipped, making re-runs safe.
+
 **Outputs:**
 ```
 audio/
@@ -60,6 +76,10 @@ audio/
 > ⚠️ **CRITICAL**: Sentence audio MUST be generated BEFORE pushing jobs to MongoDB or generating video. This allows accurate duration pre-computation.
 
 ```bash
+# All sections in parallel (recommended)
+python scripts/generate_project_audio.py --project <project-name>
+
+# Single section only
 python scripts/generate_project_audio.py --project <project-name> --section-index 1
 ```
 
@@ -188,6 +208,7 @@ Whenever processing, sectioning, or splitting script text into video clips, agen
 - Default Location: `global`
 - Default GCS Bucket: `my-video-automation-bucket-1`
 - Default Voice: `en-US-AndrewNeural` (Rate: `-10%`, Pitch: `-15Hz`).
+- **GCS Bucket Mismatches & 403 Forbidden**: If downloading older media assets results in `403 Forbidden` errors, it means the asset's bucket belongs to an older project (e.g. `project-fb2dc00c-a54a-48bd-884` using `my-video-automation-bucket-1`). Fetch the credentials from MongoDB `gcpkeys` collection and decrypt using `GCP_KEY_ENCRYPTION_SECRET` from `.env.local` to download them.
 
 ---
 
@@ -201,6 +222,9 @@ Whenever processing, sectioning, or splitting script text into video clips, agen
 | [`scripts/download_and_cut_db_videos.py`](scripts/download_and_cut_db_videos.py) | STEP 4 — GCS download & initial cut |
 | [`scripts/generate_project_audio.py`](scripts/generate_project_audio.py) | STEP 5 — Edge TTS sentence audio |
 | [`scripts/recut_section_clips.py`](scripts/recut_section_clips.py) | STEP 7 — Smart re-cut to sync video to narration |
+| [`scripts/generate_teaser_intro.py`](scripts/generate_teaser_intro.py) | Selects and stitches visual highlights (3s cuts) |
+| [`scripts/cleanup_project.py`](scripts/cleanup_project.py) | Selectively resets project state, deleting files/folders |
+| [`scripts/delete_project_completely.py`](scripts/delete_project_completely.py) | Completely wipes local folder and MongoDB records for a project |
 | [`mongo_store.py`](mongo_store.py) | Shared MongoDB schema & connection helper |
 
 ---
@@ -281,3 +305,103 @@ This preserves total duration accuracy while staying within each clip's actual s
 4. **`clips_manifest.json` must contain `sentence_clips`** arrays. If missing, run `scripts/migrate_sentence_clips.js` to derive them from existing clips data without re-running TTS.
 5. **Final deliverable** is always `exports/section_N_final.mp4` — produced by Step 7.
 6. **NEVER request 8s from Veo for all clips.** Each clip in `clips_manifest.json` must have a `veo_duration_seconds` field (4, 6, or 8) computed from its audio duration using the bracket rule above. Sending the wrong duration wastes Veo compute quota and API time.
+
+---
+
+## 7. Visual Teaser Highlights Generation
+**Script:** [`scripts/generate_teaser_intro.py`](scripts/generate_teaser_intro.py)
+
+Gathers visually striking highlights from the project sections using Vertex AI Gemini, cuts them to exactly **3 seconds** each (removing audio), and concatenates them into a standalone teaser highlights video.
+
+### Workflow:
+1. **Analyze Scene Descriptions**: Reads scene texts directly from `clips/clips_manifest.json`.
+2. **Gemini Selection**: Calls `gemini-2.5-flash` with structured JSON output configurations to select the top `X` (default: 2) most visually striking or curiosity-inducing clip numbers per section.
+3. **Cache Selections**: Caches selection results in `exports/teaser_selections.json` to prevent duplicate API billing.
+4. **Trim to 3 Seconds**:
+   - Locates trimmed section clips in `veo/section_<sec_idx>/cut/clip_<c_num:03d>.mp4`.
+   - Trims each chosen clip to exactly 3.0 seconds, skipping the first 1.0s to bypass start transition/fade artifacts when possible.
+   - Outputs individual cuts without audio (`-an`) to `exports/teaser_clips/`.
+5. **Concat**: Stitches all 3-second cuts together into the final output `exports/teaser_highlights.mp4`.
+
+```bash
+python scripts/generate_teaser_intro.py --project <project-name> --clips-per-section 2
+```
+
+---
+
+## 8. Chapter Title Card & Master Stitching Workflow
+For multi-section video projects (e.g. `the-entire-history-of-rome`), a cinematic title card is inserted before Sections 2–9, and smooth transitions are applied at the boundaries. The pipeline consists of:
+
+- **Prompt Generation & Queued Image Creation**:
+  - `scripts/generate_section_title_cards.py` reads script blocks from `source/sections_raw.txt`.
+  - Calls Vertex AI `gemini-2.5-flash` (using the project's credential key and regional `us-central1` location) to generate a still-image prompt matching the historical theme of the section.
+  - Submits a queue job to MongoDB `queuejobs` with `type: 'image'` and `model: 'imagen-3.0-generate-002'`.
+  - The parent background queue worker processes the job and uploads the image to GCS.
+- **Downloading & Title Card Rendering**:
+  - The script polls `mediaassets` for completion and downloads the JPEG.
+  - FFmpeg converts it to a 4-second widescreen `1280x720` at `24fps` video clip. It applies a Gaussian blur, a dark overlay, burns the section name and title (using a temporary `textfile` parameter to avoid single-quote escaping issues), and bakes in a `0.75s` video and audio fade-in/fade-out at the start and end of the card.
+- **Direct Section Video Fades**:
+  - `scripts/recut_section_clips.py` bakes the `0.75s` transition fades directly into `exports/section_N_final.mp4` when muxing:
+    - Section 1: fade-out only.
+    - Sections 2–9: both fade-in and fade-out.
+- **Stitching**:
+  - `scripts/stitch_project_master.py` with `--use-section-exports --insert-title-cards` handles the final compilation.
+  - It copy-concatenates (`-c copy`) the pre-faded section exports and the 4-second title cards sequentially, which completes in seconds.
+
+---
+
+## 9. Project Cleanup & Complete Deletion
+For resetting states or removing unused/large assets, the project provides cleanup scripts:
+- **Partial Cleanup (`scripts/cleanup_project.py`)**:
+  Allows selective deletion of generated assets:
+  - `--teaser-clips`: Deletes `exports/teaser_clips/`, `teaser_highlights.mp4`, and `teaser_selections.json`.
+  - `--selected-teaser-clips`: Deletes original raw/trimmed clips inside `veo/` that were chosen for the teaser.
+  - `--non-selected-teaser-clips`: Deletes enqueued raw/trimmed clips inside `veo/` that were *not* chosen for the teaser (useful to free disk space).
+  - `--audio`, `--exports`, `--title-cards`, `--veo`, `--all`: Deletes corresponding directories or files.
+- **Complete Wipe (`scripts/delete_project_completely.py`)**:
+  Deletes the entire local directory `video_projects/<project_name>/` and connects to MongoDB to remove all matching documents in `projects`, `mediaassets`, and `queuejobs` collections.
+
+---
+
+## 10. Database Key Pool & Queue Job Recovery Procedure
+
+When pushing large batches of video generation jobs to MongoDB (`push_project_to_queue.py`), the backend worker may hit a temporary GCP rate/burst limit. When this occurs, the queue worker automatically sets `isExhausted: true` on GCP service account records in MongoDB to prevent spamming failed requests, causing remaining jobs to fail with:
+> *"All service accounts in the key pool are exhausted or have billing disabled"*
+
+### 📍 Location & Collections
+- **Database**: MongoDB (`video-studio` database on `76.13.42.74:27017`)
+- **Collections**:
+  - `gcpkeys` — stores the GCP service account key pool (`isExhausted` boolean field)
+  - `queuejobs` — stores video generation queue items (`status`, `error` fields)
+
+### 🛠️ Recovery Steps for AI Agents
+
+1. **Verify GCP Credentials**:
+   Test the decrypted GCP key directly against Vertex AI using `google-genai` SDK to ensure the key itself is active and valid:
+   ```python
+   from google import genai
+   client = genai.Client(vertexai=True, project=project_id, location='us-central1', credentials=creds)
+   op = client.models.generate_videos(model='veo-3.1-lite-generate-001', prompt='test prompt', config={'aspectRatio': '16:9', 'durationSeconds': 4})
+   ```
+
+2. **Clear Key Exhaustion Flag**:
+   Connect to MongoDB and reset `isExhausted` back to `false` for all keys in `gcpkeys`:
+   ```python
+   from pymongo import MongoClient
+   db = MongoClient(MONGODB_URI)[MONGODB_DB]
+   db.gcpkeys.update_many({}, {"$set": {"isExhausted": False, "note": ""}})
+   ```
+
+3. **Requeue Failed Jobs**:
+   Reset failed queue jobs back to `status: queued` so the worker picks them up:
+   ```python
+   failed_jobs = list(db.queuejobs.find({"status": "failed"}))
+   failed_ids = [j["_id"] for j in failed_jobs]
+   db.queuejobs.update_many(
+       {"_id": {"$in": failed_ids}},
+       {"$set": {"status": "queued", "error": None, "errorMessage": None}}
+   )
+   ```
+
+
+

@@ -465,26 +465,38 @@ async def main_async() -> int:
     output_dir = project_dir / args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    manifest_sections: list[dict[str, object]] = []
-    global_clip_counter = 1
-
-    for section in sections:
-        label = section.script_name or section.title
-        print(f"Processing section {section.index:03d}: {label}")
-        sec_manifest, next_global_clip = await process_section(
+    # --- Run ALL sections concurrently ---
+    # Pass global_clip_start=1 for every section; we renumber after all finish.
+    print(f"Processing {len(sections)} sections concurrently...")
+    tasks = [
+        process_section(
             section,
-            global_clip_counter,
+            1,          # placeholder; reassigned below
             output_dir,
             args.voice,
             args.rate,
             args.pitch,
             args.clip_seconds,
-            args.dry_run
+            args.dry_run,
         )
-        global_clip_counter = next_global_clip
-        manifest_sections.append(sec_manifest)
+        for section in sections
+    ]
+    results = await asyncio.gather(*tasks)
+
+    # Sort results by section index and reassign global_clip_number sequentially
+    global_clip_counter = 1
+    manifest_sections: list[dict[str, object]] = []
+    for section, (sec_manifest, _) in sorted(
+        zip(sections, results), key=lambda pair: pair[0].index
+    ):
+        for clip in sec_manifest["clips"]:
+            clip["global_clip_number"] = global_clip_counter
+            global_clip_counter += 1
+        label = section.script_name or section.title
+        print(f"  section {section.index:03d}: {label} — {sec_manifest['total_clips']} clips")
         if not args.dry_run:
-            print(f"  wrote {sec_manifest['output_file']}")
+            print(f"    wrote {sec_manifest['output_file']}")
+        manifest_sections.append(sec_manifest)
 
     master_manifest = {
         "project_dir": str(project_dir),

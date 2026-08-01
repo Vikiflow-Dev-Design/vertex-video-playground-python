@@ -134,11 +134,49 @@ def build_section_master(sentence_paths: list[str], section_dir: Path, section_i
         print(f"\n[ERROR] Failed to build narration.mp3 for section {section_index}.")
 
 
+async def process_and_build_section(
+    section: dict,
+    audio_dir: Path,
+    voice: str,
+    rate: str,
+    pitch: str,
+) -> None:
+    """Run TTS synthesis + ffmpeg concat for one section concurrently with other sections."""
+    sec_idx = int(section["section_index"])
+    sentence_clips = section.get("sentence_clips", [])
+
+    if not sentence_clips:
+        print(f"[WARN] Section {sec_idx} has no sentence_clips. Re-run generate_section_clips.py first.")
+        return
+
+    section_dir = audio_dir / f"section_{sec_idx}"
+    section_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"[Section {sec_idx}] Starting: {section.get('section_title', '')} ({len(sentence_clips)} sentences)")
+
+    sentence_paths = await process_section_audio(
+        section_index=sec_idx,
+        sentence_clips=sentence_clips,
+        voice=voice,
+        rate=rate,
+        pitch=pitch,
+        section_dir=section_dir,
+    )
+
+    if sentence_paths:
+        # Run blocking subprocess (ffmpeg) in a thread executor so it doesn't
+        # stall the event loop while other sections are still synthesizing.
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None, build_section_master, sentence_paths, section_dir, sec_idx
+        )
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
-def main():
+async def main_async() -> None:
     parser = argparse.ArgumentParser(
         description="Synthesize per-sentence narration audio into audio/section_N/sentences/."
     )
@@ -170,38 +208,28 @@ def main():
     audio_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"[Info] Project: {args.project}")
-    print(f"[Info] Sections to process: {len(sections)}")
+    print(f"[Info] Sections to process: {len(sections)} (concurrent)")
     print(f"[Info] Voice: {args.voice} | Rate: {args.rate} | Pitch: {args.pitch}\n")
 
-    for section in sections:
-        sec_idx = int(section["section_index"])
-        sentence_clips = section.get("sentence_clips", [])
-
-        if not sentence_clips:
-            print(f"[WARN] Section {sec_idx} has no sentence_clips. Re-run generate_section_clips.py first.")
-            continue
-
-        section_dir = audio_dir / f"section_{sec_idx}"
-        section_dir.mkdir(parents=True, exist_ok=True)
-
-        print(f"======================================")
-        print(f"Section {sec_idx}: {section.get('section_title', '')} ({len(sentence_clips)} sentences)")
-        print(f"Output: {section_dir}")
-        print(f"======================================")
-
-        sentence_paths = asyncio.run(process_section_audio(
-            section_index=sec_idx,
-            sentence_clips=sentence_clips,
+    # --- Run ALL sections concurrently ---
+    # Each section synthesises its own sentences independently; there are no
+    # shared resources between sections so asyncio.gather is fully safe here.
+    await asyncio.gather(*[
+        process_and_build_section(
+            section=section,
+            audio_dir=audio_dir,
             voice=args.voice,
             rate=args.rate,
             pitch=args.pitch,
-            section_dir=section_dir,
-        ))
-
-        if sentence_paths:
-            build_section_master(sentence_paths, section_dir, sec_idx)
+        )
+        for section in sections
+    ])
 
     print("\n[Done] Audio generation complete.")
+
+
+def main():
+    asyncio.run(main_async())
 
 
 if __name__ == "__main__":
