@@ -100,6 +100,26 @@ def test_build_reference_images_reads_local_assets(tmp_path: Path) -> None:
     assert references[0].image.mime_type == "image/png"
     assert references[0].reference_type.value == "ASSET"
 
+def test_reference_images_require_eight_second_source_video(monkeypatch, tmp_path: Path) -> None:
+    captured = {}
+
+    class _Models:
+        def generate_videos(self, *, model, prompt, config):
+            captured["duration"] = config.duration_seconds
+            return _FakeOperation(done=True, response=object(), result=_FakeResult(generated_videos=[]), name="op")
+
+    class _Client:
+        models = _Models()
+
+    monkeypatch.setattr("generate_video.make_client", lambda job: _Client())
+    job = VideoJob("p", "global", "veo", "prompt", "16:9", 4, None, 0, str(tmp_path), None, None, None, None, "720p", False, False, (str(tmp_path / "ref.png"),))
+    (tmp_path / "ref.png").write_bytes(b"png")
+    try:
+        run_video_job(job, emit_status=False)
+    except Exception:
+        pass
+    assert captured["duration"] == 8
+
 
 def test_run_video_job_falls_back_to_output_gcs_uri_when_vertex_returns_null_uri(monkeypatch, tmp_path: Path) -> None:
     op2 = _FakeOperation(

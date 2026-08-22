@@ -211,6 +211,8 @@ def run_video_job(job: VideoJob, *, emit_status: bool = True) -> dict[str, objec
     client = make_client(job)
 
     clamped_duration = clamp_veo_duration(job.duration_seconds)
+    if job.reference_images:
+        clamped_duration = 8
     config_kwargs: dict[str, object] = {
         "aspect_ratio": job.aspect_ratio,
         "output_gcs_uri": job.output_gcs_uri,
