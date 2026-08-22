@@ -26,9 +26,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
 CLIP_JSON_RE = re.compile(r"^(?P<clip>\d+)(?:[-_].*)?_(?:generate_video|video)$")
 GCS_URI_RE = re.compile(r"^gs://.+\.mp4(?:\?.*)?$")
 PLAYGROUND_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(PLAYGROUND_DIR / ".env")
 
 
 @dataclass(frozen=True)
@@ -195,6 +198,21 @@ def has_audio_stream(path: Path) -> bool:
     return bool(result.stdout.strip())
 
 
+def resolve_gcp_key_path() -> Path:
+    """Resolve the project credential path independent of the caller's cwd."""
+    configured = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+    candidates = []
+    if configured:
+        configured_path = Path(configured).expanduser()
+        candidates.append(configured_path if configured_path.is_absolute() else PLAYGROUND_DIR / configured_path)
+    candidates.extend([PLAYGROUND_DIR / "gcp-key.json", Path.cwd() / "gcp-key.json"])
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    searched = ", ".join(str(path) for path in candidates)
+    raise FileNotFoundError(f"Google service-account key not found. Searched: {searched}")
+
+
 def download_gcs_uri(gcs_uri: str, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if shutil.which("gsutil"):
@@ -206,9 +224,7 @@ def download_gcs_uri(gcs_uri: str, destination: Path) -> None:
     from google.oauth2 import service_account
     from google.auth.transport.requests import Request
     
-    key_path = PLAYGROUND_DIR / "gcp-key.json"
-    if not key_path.exists():
-        key_path = Path("gcp-key.json")
+    key_path = resolve_gcp_key_path()
 
     creds = service_account.Credentials.from_service_account_file(
         str(key_path),

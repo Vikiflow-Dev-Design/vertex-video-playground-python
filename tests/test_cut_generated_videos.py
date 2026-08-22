@@ -12,6 +12,7 @@ from scripts.cut_generated_videos import (
     collect_generated_artifacts,
     load_clip_targets,
     package_trimmed_videos,
+    resolve_gcp_key_path,
     trim_video_file,
 )
 
@@ -33,6 +34,14 @@ def _ffprobe_duration(path: Path) -> float:
         text=True,
     )
     return float(result.stdout.strip())
+
+
+def test_resolve_gcp_key_path_uses_configured_relative_path(tmp_path: Path, monkeypatch) -> None:
+    key_path = tmp_path / "credentials.json"
+    key_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(key_path))
+
+    assert resolve_gcp_key_path() == key_path.resolve()
 
 
 def test_load_clip_targets_reads_manifest(tmp_path: Path) -> None:
