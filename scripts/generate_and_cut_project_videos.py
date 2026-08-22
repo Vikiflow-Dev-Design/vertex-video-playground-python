@@ -33,6 +33,7 @@ from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
 
 from generate_video import VideoJob, run_video_job
+from scripts.continuity import build_continuity_metadata, load_continuity_manifest, validate_continuity_manifest
 from scripts.cut_generated_videos import cut_project_videos
 
 PROMPT_HEADER_RE = re.compile(r"^(?P<number>\d{3}):\s+(.+)$", re.MULTILINE)
@@ -111,6 +112,7 @@ def run_generation_batch(
     project_dir: Path,
     project_slug: str,
     clip_durations: dict[int, float],
+    continuity_manifest: dict[str, object] | None = None,
 ) -> list[dict[str, object]]:
     if not batch:
         return []
@@ -144,6 +146,7 @@ def run_generation_batch(
                 project_slug=project_slug,
                 prompt=block,
                 duration_seconds=duration_val,
+                continuity_manifest=continuity_manifest,
             )
             future_to_index[executor.submit(generate_fn, job)] = (index, block, job)
 
@@ -209,6 +212,7 @@ def build_video_job(
     project_slug: str,
     prompt: PromptBlock,
     duration_seconds: float | None = None,
+    continuity_manifest: dict[str, object] | None = None,
 ) -> VideoJob:
     project_id = manifest.get("gcp_project_id")
     location = manifest.get("gcp_location") or "global"
@@ -224,6 +228,11 @@ def build_video_job(
     if not project_id:
         raise ValueError("Project manifest is missing gcp_project_id")
 
+    continuity_metadata = (
+        build_continuity_metadata(prompt.clip_number, continuity_manifest, project_dir=project_dir)
+        if continuity_manifest is not None
+        else {}
+    )
     return VideoJob(
         project_id=str(project_id),
         location=str(location),
@@ -241,6 +250,7 @@ def build_video_job(
         resolution=resolution,
         generate_audio=generate_audio,
         watermarked=False,
+        reference_images=tuple(continuity_metadata.get("referenceImages", [])),
     )
 
 
@@ -254,6 +264,12 @@ def run_generation_workflow(
     batch_size: int = 8,
 ) -> dict[str, object]:
     manifest = load_project_manifest(project_dir)
+    continuity_manifest_path = project_dir / "continuity" / "continuity.json"
+    continuity_manifest = load_continuity_manifest(project_dir)
+    if continuity_manifest_path.exists():
+        continuity_errors = validate_continuity_manifest(continuity_manifest, project_dir=project_dir)
+        if continuity_errors:
+            raise ValueError("Continuity manifest validation failed: " + "; ".join(continuity_errors))
     if "veo_resolution" not in manifest:
         manifest["veo_resolution"] = "720p"
     if "veo_generate_audio" not in manifest:
@@ -282,6 +298,7 @@ def run_generation_workflow(
                     project_dir=project_dir,
                     project_slug=project_slug,
                     clip_durations=clip_durations,
+                    continuity_manifest=continuity_manifest,
                 )
             )
 

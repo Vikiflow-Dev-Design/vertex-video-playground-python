@@ -54,7 +54,7 @@ python scripts/generate_project_audio.py --project <project> --section-index <N>
 python scripts/push_project_to_queue.py --project <project> --section-index <N> --dry-run
 ```
 
-The prompt stage validates the registry and injects its context into Gemini batches. The queue stage carries machine-readable `continuity` and `referenceImages` metadata for the downstream Veo worker. The worker must map `referenceImages` to the provider's supported reference-image input; metadata alone does not guarantee reference conditioning.
+The prompt stage validates the registry and injects its context into Gemini batches. The direct Python worker (`generate_video.py`) converts local `referenceImages` into the Google GenAI SDK's `VideoGenerationReferenceImage` objects and attaches them to `GenerateVideosConfig.reference_images`. The queue stage carries machine-readable `continuity` and `referenceImages` metadata for the downstream Veo worker. A separate queue worker must map `referenceImages` to the provider's supported reference-image input; metadata alone does not guarantee reference conditioning.
 
 ### Fern-inspired documentary animation profile
 

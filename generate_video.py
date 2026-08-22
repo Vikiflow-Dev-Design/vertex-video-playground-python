@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import mimetypes
 import os
 import sys
 import time
@@ -26,7 +27,12 @@ from typing import Optional
 
 from dotenv import load_dotenv
 from google import genai
-from google.genai.types import GenerateVideosConfig
+from google.genai.types import (
+    GenerateVideosConfig,
+    Image,
+    VideoGenerationReferenceImage,
+    VideoGenerationReferenceType,
+)
 
 from mongo_store import build_mediaasset_doc, connect, resolve_settings, utc_now, upsert_mediaasset
 
@@ -70,6 +76,7 @@ class VideoJob:
     resolution: str
     generate_audio: bool
     watermarked: bool
+    reference_images: tuple[str, ...] = ()
 
 
 def load_project_manifest(project_dir: str | None) -> dict[str, object]:
@@ -109,6 +116,7 @@ def parse_args() -> VideoJob:
     parser.add_argument("--user-id", default=None, help="MongoDB user ObjectId string")
     parser.add_argument("--project-env-id", default=None, help="MongoDB project id to link the media asset to")
     parser.add_argument("--watermarked", action="store_true", help="Mark the stored media asset as watermarked")
+    parser.add_argument("--reference-image", action="append", default=[], help="Approved reference image path; repeat for multiple images")
 
     args = parser.parse_args()
     manifest = load_project_manifest(args.project_dir)
@@ -149,7 +157,28 @@ def parse_args() -> VideoJob:
         resolution=str(resolution),
         generate_audio=bool(generate_audio),
         watermarked=bool(args.watermarked),
+        reference_images=tuple(args.reference_image),
     )
+
+
+def build_reference_images(paths: list[str] | tuple[str, ...]) -> list[VideoGenerationReferenceImage]:
+    """Convert approved local image paths into Vertex Veo reference objects."""
+    references: list[VideoGenerationReferenceImage] = []
+    for raw_path in paths:
+        path = Path(raw_path).expanduser().resolve()
+        if not path.exists():
+            raise FileNotFoundError(f"Reference image does not exist: {path}")
+        mime_type, _ = mimetypes.guess_type(path.name)
+        if not mime_type or not mime_type.startswith("image/"):
+            raise ValueError(f"Reference image must be an image file: {path}")
+        image = Image(image_bytes=path.read_bytes(), mime_type=mime_type)
+        references.append(
+            VideoGenerationReferenceImage(
+                image=image,
+                reference_type=VideoGenerationReferenceType.ASSET,
+            )
+        )
+    return references
 
 
 def clamp_veo_duration(seconds: float | int | None) -> int:
@@ -189,6 +218,8 @@ def run_video_job(job: VideoJob, *, emit_status: bool = True) -> dict[str, objec
         "generate_audio": job.generate_audio,
         "duration_seconds": clamped_duration,
     }
+    if job.reference_images:
+        config_kwargs["reference_images"] = build_reference_images(job.reference_images)
 
     config = GenerateVideosConfig(**config_kwargs)
 

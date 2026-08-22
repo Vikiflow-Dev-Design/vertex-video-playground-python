@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from generate_video import VideoJob, run_video_job
+from generate_video import VideoJob, build_reference_images, run_video_job
 
 
 @dataclass
@@ -87,6 +87,18 @@ class _FakeSettings:
         self.uri = "mongodb://example"
         self.db_name = "video-studio"
         self.user_id = "6a4264656320d6dd8421deba"
+
+
+def test_build_reference_images_reads_local_assets(tmp_path: Path) -> None:
+    image_path = tmp_path / "commander.png"
+    image_path.write_bytes(b"png-bytes")
+
+    references = build_reference_images([str(image_path)])
+
+    assert len(references) == 1
+    assert references[0].image.image_bytes == b"png-bytes"
+    assert references[0].image.mime_type == "image/png"
+    assert references[0].reference_type.value == "ASSET"
 
 
 def test_run_video_job_falls_back_to_output_gcs_uri_when_vertex_returns_null_uri(monkeypatch, tmp_path: Path) -> None:
