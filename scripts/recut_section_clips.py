@@ -71,7 +71,7 @@ def main():
     manifest_path = project_dir / "clips" / "clips_manifest.json"
     sentences_dir = project_dir / "audio" / f"section_{sec_idx}" / "sentences"
     raw_dir       = project_dir / "veo" / f"section_{sec_idx}" / "downloaded"
-    if not raw_dir.exists():
+    if not (raw_dir.exists() and any(raw_dir.glob("*.mp4"))):
         raw_dir = project_dir / "veo" / "trimmed" / "downloaded"
     cut_dir       = project_dir / "veo" / f"section_{sec_idx}" / "cut"
     exports_dir   = project_dir / "exports"
@@ -259,21 +259,11 @@ def main():
 
     if pad_needed > 0.05:
         print(f"  Padding final frame by {pad_needed:.3f}s to match narration length perfectly...")
-        vf = f"tpad=stop_mode=clone:stop_duration={pad_needed:.3f}"
-        if sec_idx == 1:
-            vf += f",fade=t=out:st={narr_dur - 0.75:.3f}:d=0.75"
-        else:
-            vf += f",fade=t=in:st=0:d=0.75,fade=t=out:st={narr_dur - 0.75:.3f}:d=0.75"
+        vf = f"tpad=stop_mode=clone:stop_duration={pad_needed:.3f},fade=t=in:st=0:d=0.75,fade=t=out:st={narr_dur - 0.75:.3f}:d=0.75"
     else:
-        if sec_idx == 1:
-            vf = f"fade=t=out:st={joined_dur - 0.75:.3f}:d=0.75"
-        else:
-            vf = f"fade=t=in:st=0:d=0.75,fade=t=out:st={joined_dur - 0.75:.3f}:d=0.75"
+        vf = f"fade=t=in:st=0:d=0.75,fade=t=out:st={joined_dur - 0.75:.3f}:d=0.75"
 
-    if sec_idx == 1:
-        af = f"afade=t=out:st={narr_dur - 0.75:.3f}:d=0.75"
-    else:
-        af = f"afade=t=in:st=0:d=0.75,afade=t=out:st={narr_dur - 0.75:.3f}:d=0.75"
+    af = f"afade=t=in:st=0:d=0.75,afade=t=out:st={narr_dur - 0.75:.3f}:d=0.75"
 
     cmd = [
         "ffmpeg", "-y",

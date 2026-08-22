@@ -65,14 +65,54 @@ def get_master_style(project_dir: Path) -> str:
     
     return "grounded cinematic historical realism, prestige drama visual tone"
 
+def load_sections_from_file(sections_raw_path: Path) -> dict[int, dict[str, str]]:
+    """
+    Parses sections_raw.txt and returns a map of:
+    section_index -> {
+        "title": "Title of the Section",
+        "script": "Script text of the section"
+    }
+    """
+    if not sections_raw_path.exists():
+        return {}
+    raw_text = sections_raw_path.read_text(encoding="utf-8")
+    
+    # Matches patterns like: # Section 2: Early Beginnings & King David
+    # or # Section 2
+    pattern = re.compile(r"^#\s+Section\s+(\d+)(?:\s*[:.\-]\s*(.+))?$", re.MULTILINE | re.IGNORECASE)
+    
+    matches = list(pattern.finditer(raw_text))
+    sections = {}
+    
+    if not matches:
+        return {}
+        
+    for index, match in enumerate(matches):
+        s_num = int(match.group(1))
+        raw_title = match.group(2)
+        title = raw_title.strip() if raw_title else f"Section {s_num}"
+        
+        start_pos = match.end()
+        end_pos = matches[index + 1].start() if index + 1 < len(matches) else len(raw_text)
+        script = raw_text[start_pos:end_pos].strip()
+        
+        sections[s_num] = {
+            "title": title,
+            "script": script
+        }
+    return sections
+
 def extract_section_script(sections_raw_path: Path, section_num: int) -> str | None:
+    sections = load_sections_from_file(sections_raw_path)
+    if section_num in sections:
+        return sections[section_num]["script"]
     if not sections_raw_path.exists():
         return None
     raw_text = sections_raw_path.read_text(encoding="utf-8")
     parts = re.split(r'(?m)^#\s+Section\s+(\d+)\s*$', raw_text)
     
     # Section 1 is index 0
-    if section_num == 1:
+    if section_num == 1 and len(parts) > 0:
         return parts[0].strip()
         
     for i in range(1, len(parts), 2):
@@ -82,6 +122,7 @@ def extract_section_script(sections_raw_path: Path, section_num: int) -> str | N
 
 def generate_image_prompt(gcp_project: str, gcp_location: str, gemini_model: str, script_text: str, master_style: str) -> str:
     from google import genai
+    import random
     
     # Create Vertex AI client
     client = genai.Client(vertexai=True, project=gcp_project, location=gcp_location)
@@ -110,19 +151,32 @@ def generate_image_prompt(gcp_project: str, gcp_location: str, gemini_model: str
     }
     
     print(f"  Calling Gemini ({gemini_model}) to generate Imagen prompt...")
-    response = client.models.generate_content(
-        model=gemini_model,
-        contents=prompt,
-        config=config
-    )
-    
-    text = response.text.strip()
-    # Clean up formatting/quotes if Gemini added any
-    if text.startswith('"') and text.endswith('"'):
-        text = text[1:-1].strip()
-    if text.startswith("'") and text.endswith("'"):
-        text = text[1:-1].strip()
-    return text
+    max_retries = 5
+    backoff_factor = 2.0
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model=gemini_model,
+                contents=prompt,
+                config=config
+            )
+            text = response.text.strip()
+            # Clean up formatting/quotes if Gemini added any
+            if text.startswith('"') and text.endswith('"'):
+                text = text[1:-1].strip()
+            if text.startswith("'") and text.endswith("'"):
+                text = text[1:-1].strip()
+            return text
+        except Exception as e:
+            e_str = str(e)
+            is_rate_limit = "429" in e_str or "RESOURCE_EXHAUSTED" in e_str
+            if is_rate_limit and attempt < max_retries - 1:
+                sleep_time = (backoff_factor ** attempt) + random.uniform(1.0, 3.0)
+                print(f"  [WARN] Gemini API rate limit hit (429/RESOURCE_EXHAUSTED). Retrying in {sleep_time:.2f}s (Attempt {attempt+1}/{max_retries})...")
+                time.sleep(sleep_time)
+            else:
+                raise e
+    raise RuntimeError("Failed to generate image prompt after maximum retries")
 
 def download_image_file(asset_id: str, gcs_uri: str, destination: Path, key_path: Path) -> bool:
     from google.oauth2 import service_account
@@ -174,8 +228,6 @@ def composite_title_card(bg_image_path: Path, section_num: int, title_text: str,
     font_regular = "C:/Windows/Fonts/arial.ttf".replace(":", "\\:")
     font_bold = "C:/Windows/Fonts/arialbd.ttf".replace(":", "\\:")
 
-    part_text = f"PART {section_num}"
-    
     # Write title text to a temp file to avoid complex shell/FFmpeg escaping rules
     temp_file = output_path.parent / f"temp_text_{section_num}.txt"
     temp_file.write_text(title_text.upper(), encoding="utf-8")
@@ -189,10 +241,8 @@ def composite_title_card(bg_image_path: Path, section_num: int, title_text: str,
             f"scale=1280:720,format=yuv420p,"
             f"gblur=sigma=6,"
             f"drawbox=w=iw:h=ih:color=black@0.50:t=fill,"
-            f"drawtext=text='{part_text}':fontsize=30:fontcolor=white@0.70:"
-            f"x=(w-text_w)/2:y=(h/2)-90:fontfile='{font_regular}',"
             f"drawtext=textfile='{temp_file_escaped}':fontsize=56:fontcolor=white:"
-            f"x=(w-text_w)/2:y=(h/2)-20:fontfile='{font_bold}',"
+            f"x=(w-text_w)/2:y=(h-text_h)/2:fontfile='{font_bold}',"
             f"fade=t=in:st=0:d=0.75,"
             f"fade=t=out:st=3.25:d=0.75"
         ),
@@ -286,6 +336,7 @@ def main():
     raw_dir.mkdir(parents=True, exist_ok=True)
 
     sections_raw_path = project_dir / "source" / "sections_raw.txt"
+    parsed_sections = load_sections_from_file(sections_raw_path)
     master_style = get_master_style(project_dir)
 
     print("\n--- PHASE 0 & 1: PROMPT GENERATION & QUEUE SUBMISSION ---")
@@ -304,7 +355,8 @@ def main():
             pass
 
     for s_num in sections_to_process:
-        print(f"\nProcessing Section {s_num}: {SECTION_TITLES.get(s_num, 'N/A')}")
+        section_title = parsed_sections.get(s_num, {}).get("title") or SECTION_TITLES.get(s_num, "N/A")
+        print(f"\nProcessing Section {s_num}: {section_title}")
         
         prompt_file = prompts_dir / f"section_{s_num}_prompt.txt"
         bg_image_path = raw_dir / f"section_{s_num}_bg.jpg"
@@ -449,7 +501,7 @@ def main():
             print(f"  [Skip] Cannot composite Section {s_num} title card because raw background is missing.")
             continue
             
-        title_text = SECTION_TITLES.get(s_num, f"Section {s_num}")
+        title_text = parsed_sections.get(s_num, {}).get("title") or SECTION_TITLES.get(s_num, f"Section {s_num}")
         print(f"Compositing card for Section {s_num}...")
         success = composite_title_card(bg_image_path, s_num, title_text, card_video_path)
         if success:
