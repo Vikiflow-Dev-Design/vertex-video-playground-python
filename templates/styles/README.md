@@ -10,6 +10,7 @@ that project's lifetime.
 - `paper/` — legacy profile retained for existing projects.
 - `2d/` — legacy profile retained for existing projects.
 - `3d/` — legacy profile retained for existing projects.
+- `low-poly-3d/` — stylized low-poly polygonal 3D cinematic contract.
 - `fern-animation/` — original Fern-inspired documentary animation contract.
 
 ## Fern-animation

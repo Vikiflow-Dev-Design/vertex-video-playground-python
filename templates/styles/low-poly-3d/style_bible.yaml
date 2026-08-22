@@ -1,0 +1,36 @@
+style_id: low-poly-3d-v1
+style_name: low-poly-3d
+visual_identity:
+  description: "Full-body low-poly 3D cinematic render with angular geometry, sharp shadows, exaggerated polygonal forms, minimal facial detail, and clean flat shading."
+  palette:
+    - charcoal
+    - steel blue
+    - muted gray
+    - desaturated amber accents
+  geometry:
+    - faceted forms
+    - simplified silhouettes
+    - hard-edged surfaces
+    - visible polygon planes
+  lighting:
+    - sharp directional key light
+    - strong shadow separation
+    - subtle rim light
+    - game-cinematic contrast
+  camera:
+    - cinematic framing
+    - deliberate motion
+    - stable subject scale
+    - game-cutscene composition
+motion_rules:
+  - Keep motion subtle and purposeful.
+  - Prefer slow pushes, pans, and orbit moves over handheld movement.
+  - Avoid realistic skin detail and fine facial micro-expression.
+negative_prompt:
+  - photorealistic skin
+  - soft painterly brushwork
+  - anime styling
+  - watercolor
+  - heavy film grain
+  - noisy textures
+  - blurry geometry
