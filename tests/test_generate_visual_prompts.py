@@ -26,6 +26,29 @@ def test_run_prompt_generation_writes_single_project_file(tmp_path: Path) -> Non
         ),
         encoding="utf-8",
     )
+    (project_dir / "continuity" / "continuity.json").parent.mkdir(parents=True)
+    (project_dir / "continuity" / "continuity.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "style_id": "fern-animation-v1",
+                "style_bible": "instructions/styles/fern-animation/style_bible.yaml",
+                "characters": {"commander_01": {"description": "adult commander, charcoal coat"}},
+                "locations": {"archive_room_01": {"description": "stone archive room"}},
+                "props": {},
+                "shots": {
+                    "001": {
+                        "characters": ["commander_01"],
+                        "location": "archive_room_01",
+                        "camera": "slow push-in",
+                        "lighting_state": "warm light from camera-left",
+                    }
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     (clips_dir / "001-opening_clips.txt").write_text(
         """Total words: 4
@@ -58,13 +81,13 @@ Third clip
         clip_numbers: list[str] = []
         in_clips = False
         for line in clip_payload.splitlines():
-            if line.strip() == "CLIPS:":
+            if line.strip().startswith("CLIPS"):
                 in_clips = True
                 continue
             if not in_clips:
                 continue
-            if line[:3].isdigit():
-                clip_numbers.append(line.split(":", 1)[0])
+            if line.startswith("Clip "):
+                clip_numbers.append(line.split()[1].split("[")[0])
         return "\n\n".join(
             f"{clip_number}: Prompt for {clip_number}\n\n--\n\nSTYLE: alpha" for clip_number in clip_numbers
         ) + "\n"
@@ -87,6 +110,10 @@ Third clip
     assert state_path.exists()
     assert json_path.exists()
     assert len(calls) == 2
+    assert "STYLE ID: fern-animation-v1" in calls[0]
+    assert "CHARACTER commander_01" in calls[0]
+    assert "LOCATION archive_room_01" in calls[0]
+    assert "camera: slow push-in" in calls[0]
     assert summary["output_path"] == str(output_path)
     assert summary["batch_size"] == 2
     assert "001: Prompt for 001" in output_path.read_text(encoding="utf-8")

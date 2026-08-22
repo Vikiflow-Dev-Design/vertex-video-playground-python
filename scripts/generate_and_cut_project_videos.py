@@ -303,7 +303,7 @@ def run_generation_workflow(
         from scripts.stitch_project_master import main as run_stitch
         sys.argv = ["stitch_project_master.py", "--project", project_dir.name]
         run_stitch()
-    except Exception as e:
+    except (Exception, SystemExit) as e:
         print(f"[Warning] Failed to auto-stitch master movie: {e}")
 
     return {

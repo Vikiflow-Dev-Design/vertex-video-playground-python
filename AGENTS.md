@@ -13,6 +13,55 @@ This guide outlines core conventions, project architecture, authentication, and 
 
 ---
 
+## Visual Continuity Contract
+
+For any project that needs recurring characters, locations, props, or a unified animation style, continuity is a first-class input—not an afterthought in the prose prompt.
+
+### Required project files
+
+New projects created by `scripts/create_video_project.py` receive:
+
+```text
+continuity/
+  continuity.json                 # canonical IDs and shot relationships
+  references/characters/          # approved character anchors
+  references/locations/           # approved location anchors
+  references/props/               # approved prop anchors
+instructions/styles/<style>/
+  visual_prompt_master_prompt.md  # frozen prompt contract
+  style_bible.yaml                # palette, lighting, motion, camera rules
+  camera_language.md
+  motion_rules.md
+  negative_prompt.md
+qa/                               # continuity and visual-review reports
+```
+
+### Registry rules
+
+- Use stable IDs such as `commander_01`, `archive_room_01`, and `brass_lamp_01`.
+- Put canonical appearance, wardrobe, palette, location, and prop descriptions in `continuity/continuity.json`.
+- Reference images are required for recurring identities when available; they are not required for every atmospheric or one-off shot.
+- Use the same character/location/prop IDs across related shots. Do not rewrite their identity from memory in each prompt.
+- Store `previous_shot`, `next_shot`, camera, lighting state, and transition data for connected shots.
+- Never put credentials, `.env` files, or private customer material in the continuity registry or reference folders.
+
+### Validation and generation order
+
+```bash
+python scripts/validate_continuity.py --project <project>
+python scripts/generate_visual_prompts.py --project <project>
+python scripts/generate_project_audio.py --project <project> --section-index <N>
+python scripts/push_project_to_queue.py --project <project> --section-index <N> --dry-run
+```
+
+The prompt stage validates the registry and injects its context into Gemini batches. The queue stage carries machine-readable `continuity` and `referenceImages` metadata for the downstream Veo worker. The worker must map `referenceImages` to the provider's supported reference-image input; metadata alone does not guarantee reference conditioning.
+
+### Fern-inspired documentary animation profile
+
+`fern-animation` is an original style profile inspired by scene-first documentary storytelling. It uses restrained tactile 2.5D motion, stable silhouettes, muted charcoal/parchment/rust/amber colors, motivated camera movement, and environmental evidence. It must not copy another creator's exact frames, wording, characters, or branded design.
+
+---
+
 ## 2. COMPLETE SECTION PIPELINE (The Proven Workflow)
 
 This is the **exact, validated pipeline** used to produce a perfect section video with synced narration. Follow these steps in order for every section.

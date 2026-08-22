@@ -44,6 +44,36 @@ def test_create_project_workspace_records_style_and_copies_style_prompt(tmp_path
     assert copied_prompt == template_prompt
 
 
+def test_create_project_workspace_bootstraps_continuity_contract(tmp_path: Path) -> None:
+    project_dir = create_project_workspace(
+        slug="demo-continuity-project",
+        title="Demo Continuity Project",
+        description="",
+        base_dir=tmp_path,
+        style="fern-animation",
+        gcp_project_id=None,
+        gcp_location="global",
+        gcs_bucket=None,
+        gcs_prefix="hermes",
+        gemini_model="gemini-2.5-flash",
+        story_model="gemini-2.5-flash",
+        veo_model="veo-3.1-lite-generate-001",
+        mongo_uri=None,
+        mongo_db=None,
+        user_id=None,
+    )
+
+    manifest = json.loads((project_dir / "project.json").read_text(encoding="utf-8"))
+    continuity = json.loads((project_dir / "continuity" / "continuity.json").read_text(encoding="utf-8"))
+    assert manifest["style"] == "fern-animation"
+    assert manifest["continuity_manifest"] == "continuity/continuity.json"
+    assert continuity["schema_version"] == 1
+    assert continuity["style_id"] == "fern-animation-v1"
+    assert (project_dir / "continuity" / "references" / "characters").is_dir()
+    assert (project_dir / "continuity" / "references" / "locations").is_dir()
+    assert (project_dir / "instructions" / "styles" / "fern-animation" / "style_bible.yaml").exists()
+
+
 def test_create_project_workspace_uses_workspace_defaults(tmp_path: Path, monkeypatch) -> None:
     defaults_file = tmp_path / "_workspace_defaults.json"
     defaults_file.write_text(

@@ -34,6 +34,7 @@ load_dotenv()
 from mongo_store import connect, resolve_settings
 from scripts.generate_and_cut_project_videos import parse_prompt_file, discover_prompt_files, resolve_project_dir, PromptBlock, PROMPT_HEADER_RE
 from scripts.precompute_clip_durations import precompute_clip_durations
+from scripts.continuity import build_continuity_metadata, load_continuity_manifest, validate_continuity_manifest
 
 DEFAULT_BASE_DIR = PROJECT_ROOT / "video_projects"
 
@@ -111,6 +112,13 @@ def main() -> int:
         return 1
 
     project_manifest = json.loads(project_manifest_path.read_text(encoding="utf-8"))
+    continuity_manifest_path = project_dir / "continuity" / "continuity.json"
+    continuity_manifest = load_continuity_manifest(project_dir)
+    if continuity_manifest_path.exists():
+        continuity_errors = validate_continuity_manifest(continuity_manifest, project_dir=project_dir)
+        if continuity_errors:
+            print("Error: Continuity manifest validation failed: " + "; ".join(continuity_errors), file=sys.stderr)
+            return 1
 
     # Resolve DB Settings
     mongo_uri = project_manifest.get("mongo_uri") or os.getenv("MONGODB_URI")
@@ -227,6 +235,11 @@ def main() -> int:
         # Use pre-computed Veo duration (ceiling step from real audio duration + overflow)
         job_duration = durations.get(block.clip_number, 8)  # fallback to 8s if somehow missing
         token_cost = job_duration * rate
+        continuity_metadata = build_continuity_metadata(
+            block.clip_number,
+            continuity_manifest,
+            project_dir=project_dir,
+        )
 
         job_doc = {
             "userId": settings.user_id,
@@ -234,6 +247,8 @@ def main() -> int:
             "task": "video",
             "status": "queued",
             "prompt": block.prompt_text,
+            "continuity": continuity_metadata,
+            "referenceImages": continuity_metadata.get("referenceImages", []),
             "model": veo_model,
             "aspectRatio": "16:9",
             "durationSeconds": job_duration,

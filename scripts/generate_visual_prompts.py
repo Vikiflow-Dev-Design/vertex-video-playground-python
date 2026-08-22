@@ -27,6 +27,11 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai.types import GenerateContentConfig
 from scripts.style_profiles import resolve_style_template_path
+from scripts.continuity import (
+    build_continuity_context,
+    load_continuity_manifest,
+    validate_continuity_manifest,
+)
 
 try:
     from google.genai.types import ThinkingConfig
@@ -268,6 +273,12 @@ def run_prompt_generation(
     raw_script_path = project_dir / "source" / "sections_raw.txt"
     raw_script = raw_script_path.read_text(encoding="utf-8") if raw_script_path.exists() else ""
     clips_details = load_clips_details(project_dir)
+    continuity_manifest = load_continuity_manifest(project_dir)
+    continuity_manifest_path = project_dir / "continuity" / "continuity.json"
+    if continuity_manifest_path.exists():
+        continuity_errors = validate_continuity_manifest(continuity_manifest, project_dir=project_dir)
+        if continuity_errors:
+            raise ValueError("Continuity manifest validation failed: " + "; ".join(continuity_errors))
 
     clip_sets: list[dict[str, object]] = []
     total_expected = 0
@@ -361,7 +372,9 @@ def run_prompt_generation(
                 expected_total,
                 continuity_reference,
                 full_script=raw_script,
-                clips_details=clips_details
+                clips_details=clips_details,
+                continuity_manifest=continuity_manifest,
+                project_dir=project_dir,
             )
             generated = send_fn(client, project_model, clip_set["master_prompt"], payload, temperature, thinking_budget)
             normalized = renumber_generated_text(generated, batch_start)
@@ -439,6 +452,8 @@ def build_batch_payload(
     continuity_reference: str | None,
     full_script: str = "",
     clips_details: dict[int, dict[str, object]] | None = None,
+    continuity_manifest: dict[str, object] | None = None,
+    project_dir: Path | None = None,
 ) -> str:
     lines = [
         "Generate visual prompts for the requested clips in this batch.",
@@ -471,6 +486,11 @@ def build_batch_payload(
         status = details.get("status") or "standalone"
         relation_str = f" [Relation ID: {relation_id}, Parent ID: {parent_id}, Duration: {duration}s, Status: {status}]"
         lines.append(f"Clip {clip.number:03d}{relation_str}: {clip.text}")
+        if continuity_manifest is not None and project_dir is not None:
+            lines.extend([
+                build_continuity_context(clip.number, continuity_manifest, project_dir=project_dir),
+                "",
+            ])
     return "\n".join(lines).strip() + "\n"
 
 

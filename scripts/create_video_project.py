@@ -163,7 +163,21 @@ def create_project_workspace(
         project_id = f"project-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
 
     project_dir.mkdir(parents=True, exist_ok=True)
-    for subdir in ["source", "story", "clips", "prompts", "veo", "logs", "instructions", "instructions/styles"]:
+    for subdir in [
+        "source",
+        "story",
+        "clips",
+        "prompts",
+        "veo",
+        "logs",
+        "qa",
+        "continuity",
+        "continuity/references/characters",
+        "continuity/references/locations",
+        "continuity/references/props",
+        "instructions",
+        "instructions/styles",
+    ]:
         (project_dir / subdir).mkdir(parents=True, exist_ok=True)
 
     manifest = {
@@ -174,6 +188,10 @@ def create_project_workspace(
         "style": style_name,
         "visual_prompt_master_prompt": "instructions/visual_prompt_master_prompt.md",
         "style_template": str(resolve_style_template_path(style_name).relative_to(PROJECT_ROOT)),
+        "style_bible": f"instructions/styles/{style_name}/style_bible.yaml",
+        "continuity_manifest": "continuity/continuity.json",
+        "reference_root": "continuity/references",
+        "qa_report": "qa/continuity-report.json",
         "gcp_project_id": resolved_gcp_project_id,
         "gcp_location": resolved_gcp_location,
         "gcs_bucket": resolved_gcs_bucket,
@@ -246,15 +264,48 @@ result handles.
 
     instructions_readme = """# Instructions
 
-The copied master prompts live here so each project has its own frozen prompt
-contracts for Gemini.
+The copied master prompts and style contract live here so each project has
+frozen prompt instructions for Gemini and Veo.
+
+The continuity registry is in `../continuity/continuity.json`.
 """
     write_text(project_dir / "instructions" / "README.md", instructions_readme)
+
+    continuity_readme = """# Continuity
+
+`continuity.json` is the canonical registry for stable characters, locations,
+props, shots, style IDs, and reference images.
+
+Add approved reference images under `references/characters/`,
+`references/locations/`, or `references/props/`. Use stable IDs in the shot
+entries instead of rewriting descriptions from memory.
+
+Run `python scripts/validate_continuity.py --project <project>` before prompt
+or Veo generation.
+"""
+    write_text(project_dir / "continuity" / "README.md", continuity_readme)
+    write_text(project_dir / "qa" / "README.md", "# QA\n\nStore continuity, prompt, frame-contact-sheet, and finishing reports here.\n")
 
     copyfile(resolve_style_template_path(style_name), project_dir / "instructions" / "visual_prompt_master_prompt.md")
     style_prompt_dir = project_dir / "instructions" / "styles" / style_name
     style_prompt_dir.mkdir(parents=True, exist_ok=True)
+    style_source_dir = resolve_style_template_path(style_name).parent
     copyfile(resolve_style_template_path(style_name), style_prompt_dir / "visual_prompt_master_prompt.md")
+    for support_name in ["style_bible.yaml", "camera_language.md", "motion_rules.md", "negative_prompt.md"]:
+        support_source = style_source_dir / support_name
+        if support_source.exists():
+            copyfile(support_source, style_prompt_dir / support_name)
+
+    continuity_manifest = {
+        "schema_version": 1,
+        "style_id": f"{style_name}-v1",
+        "style_bible": f"instructions/styles/{style_name}/style_bible.yaml",
+        "characters": {},
+        "locations": {},
+        "props": {},
+        "shots": {},
+    }
+    write_text(project_dir / "continuity" / "continuity.json", json.dumps(continuity_manifest, indent=2) + "\n")
     if DEFAULT_STORY_PROMPT.exists():
         copyfile(DEFAULT_STORY_PROMPT, project_dir / "instructions" / "story_sectioning_master_prompt.md")
 

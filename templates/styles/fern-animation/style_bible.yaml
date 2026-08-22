@@ -1,0 +1,32 @@
+style_id: fern-animation-v1
+name: Fern-inspired Documentary Animation
+version: 1
+palette:
+  primary: muted charcoal
+  secondary: parchment and weathered stone
+  accent: rust red and faded amber
+  shadows: cool blue-gray
+lighting:
+  default: directional low-key documentary lighting
+  contrast: medium-high but readable
+  continuity: preserve source direction across adjacent shots
+animation:
+  medium: restrained tactile 2.5D animation
+  motion: deliberate, limited, physically motivated
+  depth: layered parallax with matte surfaces
+  avoid: rubbery motion, glossy plastic, random camera shake
+camera:
+  preferred: [wide establishing, medium observational, object close-up, slow push-in, controlled tracking]
+  screen_direction: preserve across adjacent shots
+  movement: motivated by subject or narrative reveal
+composition:
+  default: clean widescreen documentary framing
+  subjects: readable silhouettes and uncluttered focal planes
+texture:
+  paper_grain: subtle
+  film_grain: fine
+  edges: tactile and slightly weathered
+content:
+  figures: adult figures only
+  violence: imply through aftermath and environment; never graphic
+  historical_people: use stable role descriptions, not names
