@@ -70,6 +70,89 @@ def veo_ceiling(dur: float) -> int:
 # Core
 # ---------------------------------------------------------------------------
 
+def compute_clip_target_durations(
+    project_dir: Path,
+    section_index: int,
+    verbose: bool = True,
+) -> dict[int, float]:
+    """
+    Compute the REAL per-clip trim target durations from actual sentence audio.
+
+    This is the single source of truth for how long each clip must be to stay
+    in sync with narration.mp3. It measures the real rendered sentence MP3s
+    (which include natural leading/trailing silence) and distributes them across
+    video clips via the manifest's sentence->clip mapping (proportionally for
+    split sentences).
+
+    Each clip is trimmed to its OWN audio segment — we never borrow time from a
+    neighbour. The only cap is the maximum Veo step (8s), which a clip's source
+    footage can physically hold; the sentence clipper keeps clips under this in
+    practice, so the cap is a safety net for rare edge cases.
+
+    Returns
+    -------
+    dict mapping clip_number (int) -> real target duration in seconds (float).
+    """
+    manifest_path  = project_dir / "clips" / "clips_manifest.json"
+    sentences_dir  = project_dir / "audio" / f"section_{section_index}" / "sentences"
+
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"clips_manifest.json not found: {manifest_path}")
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    section = next(
+        (s for s in manifest.get("sections", []) if int(s.get("section_index", -1)) == section_index),
+        None,
+    )
+    if not section:
+        raise ValueError(f"Section {section_index} not found in clips_manifest.json")
+
+    sentence_clips = section["sentence_clips"]
+
+    # ── Step 1: Probe REAL sentence audio durations ─────────────────────────
+    if not sentences_dir.exists():
+        raise FileNotFoundError(
+            f"Sentence audio directory not found: {sentences_dir}\n"
+            f"  -> Run: python scripts/generate_project_audio.py --project <project> --section-index {section_index}"
+        )
+
+    sent_audio_durs: dict[int, float] = {}
+    missing: list[str] = []
+    for sent in sentence_clips:
+        snum = int(sent["sentence_clip_number"])
+        mp3_path = sentences_dir / f"sent_{snum:03d}.mp3"
+        if not mp3_path.exists():
+            missing.append(str(mp3_path))
+        else:
+            sent_audio_durs[snum] = probe_duration(mp3_path)
+
+    if missing:
+        paths_str = "\n    ".join(missing)
+        raise FileNotFoundError(
+            f"\nMissing sentence audio files for Section {section_index}:\n    {paths_str}\n"
+            f"  -> Run: python scripts/generate_project_audio.py --project <project> --section-index {section_index}"
+        )
+
+    # ── Step 2: Distribute real audio across video clips (no borrowing) ─────
+    new_durs: dict[int, float] = {}
+    for sent in sentence_clips:
+        snum = int(sent["sentence_clip_number"])
+        new_sent_dur = sent_audio_durs[snum]
+
+        if not sent.get("split", False):
+            cn = int(sent["video_clip_numbers"][0])
+            new_durs[cn] = round(min(new_sent_dur, MAX_VEO_DUR), 3)
+        else:
+            parts = sent["part_durations"]
+            orig_total = sum(p["duration_seconds"] for p in parts)
+            for part in parts:
+                cn = int(part["clip_number"])
+                ratio = part["duration_seconds"] / orig_total if orig_total else 0.5
+                new_durs[cn] = round(min(new_sent_dur * ratio, MAX_VEO_DUR), 3)
+
+    return new_durs
+
+
 def precompute_clip_durations(
     project_dir: Path,
     section_index: int,
@@ -88,113 +171,15 @@ def precompute_clip_durations(
     -------
     dict mapping clip_number (int) → veo_job_duration (int ∈ {4, 6, 8})
     """
-    manifest_path  = project_dir / "clips" / "clips_manifest.json"
-    sentences_dir  = project_dir / "audio" / f"section_{section_index}" / "sentences"
-
-    # ── Load manifest ───────────────────────────────────────────────────────
-    if not manifest_path.exists():
-        raise FileNotFoundError(f"clips_manifest.json not found: {manifest_path}")
-
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    section = next(
-        (s for s in manifest.get("sections", []) if int(s.get("section_index", -1)) == section_index),
-        None,
-    )
-    if not section:
-        raise ValueError(f"Section {section_index} not found in clips_manifest.json")
-
-    sentence_clips = section["sentence_clips"]
-    manifest_clip_durs: dict[int, float] = {
-        int(c["clip_number"]): float(c["duration_seconds"])
-        for c in section.get("clips", [])
-    }
-
-    # ── Step 1: Probe sentence audio durations ──────────────────────────────
     if verbose:
-        print(f"\n[Pre-compute] Step 1: Probing sentence audio durations")
-        print(f"  Source: {sentences_dir}")
+        print(f"\n[Pre-compute] Computing real per-clip target durations for Section {section_index}")
 
-    if not sentences_dir.exists():
-        raise FileNotFoundError(
-            f"Sentence audio directory not found: {sentences_dir}\n"
-            f"  -> Run: python scripts/generate_project_audio.py --project <project> --section-index {section_index}"
-        )
-
-    sent_audio_durs: dict[int, float] = {}
-    missing: list[str] = []
-
-    for sent in sentence_clips:
-        snum = int(sent["sentence_clip_number"])
-        mp3_path = sentences_dir / f"sent_{snum:03d}.mp3"
-        if not mp3_path.exists():
-            missing.append(str(mp3_path))
-        else:
-            dur = probe_duration(mp3_path)
-            sent_audio_durs[snum] = dur
-            if verbose:
-                print(f"  sent_{snum:03d}.mp3 = {dur:.3f}s")
-
-    if missing:
-        paths_str = "\n    ".join(missing)
-        raise FileNotFoundError(
-            f"\nMissing sentence audio files for Section {section_index}:\n    {paths_str}\n"
-            f"  -> Run: python scripts/generate_project_audio.py --project <project> --section-index {section_index}"
-        )
-
-    # ── Step 2: Compute per-video-clip target durations ─────────────────────
-    if verbose:
-        print(f"\n[Pre-compute] Step 2: Computing per-clip target durations")
-
-    new_durs: dict[int, float] = {}
-
-    for sent in sentence_clips:
-        snum = int(sent["sentence_clip_number"])
-        new_sent_dur = sent_audio_durs[snum]
-
-        if not sent.get("split", False):
-            cn = int(sent["video_clip_numbers"][0])
-            new_durs[cn] = round(new_sent_dur, 3)
-        else:
-            parts = sent["part_durations"]
-            orig_total = sum(p["duration_seconds"] for p in parts)
-            for part in parts:
-                cn = int(part["clip_number"])
-                ratio = part["duration_seconds"] / orig_total if orig_total else 0.5
-                new_durs[cn] = round(new_sent_dur * ratio, 3)
-
-    # ── Step 3: Overflow redistribution ─────────────────────────────────────
-    if verbose:
-        print(f"\n[Pre-compute] Step 3: Overflow redistribution")
-
+    new_durs = compute_clip_target_durations(project_dir, section_index, verbose=verbose)
     clip_nums = sorted(new_durs.keys())
-    for i, cn in enumerate(clip_nums):
-        orig_manifest_dur = manifest_clip_durs.get(cn, MAX_VEO_DUR)
-        source_cap = float(veo_ceiling(orig_manifest_dur))
 
-        if new_durs[cn] > source_cap:
-            overflow = round(new_durs[cn] - source_cap, 3)
-            new_durs[cn] = source_cap
-
-            before = clip_nums[i - 1] if i > 0 else None
-            after  = clip_nums[i + 1] if i < len(clip_nums) - 1 else None
-
-            if before is not None and after is not None:
-                target = before if new_durs[before] <= new_durs[after] else after
-            elif before is not None:
-                target = before
-            else:
-                target = after
-
-            if target is not None:
-                new_durs[target] = round(new_durs[target] + overflow, 3)
-                if verbose:
-                    print(f"  clip_{cn:03d}: capped at {source_cap:.1f}s, "
-                          f"overflow {overflow:.3f}s -> clip_{target:03d} "
-                          f"(now {new_durs[target]:.3f}s)")
-
-    # ── Step 4: Map to ceiling Veo steps ────────────────────────────────────
+    # ── Map to ceiling Veo steps ────────────────────────────────────────────
     if verbose:
-        print(f"\n[Pre-compute] Step 4: Mapping to Veo job durations (ceiling step)")
+        print(f"\n[Pre-compute] Mapping to Veo job durations (ceiling step)")
         print(f"\n  {'Clip':<10} {'Target':>10} {'Veo Job':>10}")
         print("  " + "-" * 32)
 

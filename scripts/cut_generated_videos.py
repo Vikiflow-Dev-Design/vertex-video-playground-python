@@ -28,6 +28,11 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+try:  # Support both "python scripts/x.py" and "python -m scripts.x" invocations
+    from scripts.precompute_clip_durations import compute_clip_target_durations
+except ImportError:  # pragma: no cover - fallback when run as a top-level script
+    from precompute_clip_durations import compute_clip_target_durations
+
 CLIP_JSON_RE = re.compile(r"^(?P<clip>\d+)(?:[-_].*)?_(?:generate_video|video)$")
 GCS_URI_RE = re.compile(r"^gs://.+\.mp4(?:\?.*)?$")
 PLAYGROUND_DIR = Path(__file__).resolve().parent.parent
@@ -328,6 +333,27 @@ def cut_project_videos(project_dir: Path, section_index: int | None = None) -> d
         raise VideoCutError("No clip targets were loaded from the manifest")
     target_map = {target.clip_number: target for target in targets}
 
+    # The manifest stores the spoken WORD-SPAN per clip, but narration.mp3 is
+    # built from the full sentence MP3s (which include natural leading/trailing
+    # silence). Trimming to the word-span makes every clip ~0.5s short, and the
+    # drift accumulates until the visuals race ahead of the voice. Recompute the
+    # REAL per-clip trim targets from the actual sentence audio so each clip
+    # matches its narration segment exactly.
+    real_targets: dict[int, float] = {}
+    try:
+        section_for_durations = section_index
+        if section_for_durations is None:
+            manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest_sections = manifest_payload.get("sections", [])
+            if len(manifest_sections) == 1:
+                section_for_durations = int(manifest_sections[0].get("section_index", 1))
+        if section_for_durations is not None:
+            real_targets = compute_clip_target_durations(
+                project_dir, section_for_durations, verbose=False
+            )
+    except (FileNotFoundError, ValueError, KeyError) as exc:
+        print(f"[WARN] Falling back to manifest word-span durations: {exc}")
+
     artifacts = collect_generated_artifacts(veo_dir)
     if not artifacts:
         raise VideoCutError(f"No generated video JSON files found in {veo_dir}")
@@ -362,7 +388,15 @@ def cut_project_videos(project_dir: Path, section_index: int | None = None) -> d
             tmp_trimmed = tmp_root / trimmed.name
 
             download_gcs_uri(artifact.source_uri, tmp_download)
-            trim_video_file(tmp_download, tmp_trimmed, target.duration_seconds)
+
+            # Prefer the REAL audio-derived target so the clip matches its
+            # narration segment. Never request more than the source footage
+            # actually contains (avoids ffmpeg padding / freeze frames).
+            source_footage = ffprobe_duration_seconds(tmp_download)
+            desired_duration = real_targets.get(artifact.clip_number, target.duration_seconds)
+            trim_duration = min(desired_duration, source_footage)
+
+            trim_video_file(tmp_download, tmp_trimmed, trim_duration)
             shutil.move(str(tmp_trimmed), trimmed)
             shutil.move(str(tmp_download), downloaded)
 
@@ -374,7 +408,7 @@ def cut_project_videos(project_dir: Path, section_index: int | None = None) -> d
                     source_uri=artifact.source_uri,
                     downloaded_path=str(downloaded),
                     trimmed_path=str(trimmed),
-                    target_duration_seconds=target.duration_seconds,
+                    target_duration_seconds=trim_duration,
                     actual_duration_seconds=ffprobe_duration_seconds(trimmed),
                 )
             )
